@@ -1,0 +1,204 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import statsmodels.api as sm
+import pandas as pd
+from itertools import product
+
+macro_econ_data = sm.datasets.macrodata.load_pandas().data 
+macro_econ_data
+
+fig, axes = plt.subplots(nrows=3, ncols=2, dpi=300, figsize=(11,6))
+for i, ax in enumerate(axes.flatten()[:6]): 
+     data = macro_econ_data[macro_econ_data.columns[i+2]] 
+ 
+     ax.plot(data, color='black', linewidth=1)
+     ax.set_title(macro_econ_data.columns[i+2]) 
+     ax.xaxis.set_ticks_position('none')
+     ax.yaxis.set_ticks_position('none')
+     ax.spines['top'].set_alpha(0)
+     ax.tick_params(labelsize=6)
+
+
+plt.setp(axes, xticks=np.arange(0, 208, 8), xticklabels=np.arange(1959, 2010, 2))
+
+fig.autofmt_xdate()
+plt.tight_layout()
+
+
+
+#Stationarity check for our target variable
+target = macro_econ_data['realgdp'] 
+exog = macro_econ_data[['realcons', 'realinv', 'realgovt', 'realdpi', 'cpi']] 
+
+from statsmodels.tsa.stattools import adfuller
+
+ad_fuller_result = adfuller(target)
+print(f'ADF Statistic: {ad_fuller_result[0]}')
+print(f'p-value: {ad_fuller_result[1]}')
+
+
+#Apply transformation
+target_diff = target.diff() 
+
+ad_fuller_result = adfuller(target_diff[1:])
+print(f'ADF Statistic: {ad_fuller_result[0]}')
+print(f'p-value: {ad_fuller_result[1]}')
+
+
+
+#Function to fit all unique SARIMAX models
+from typing import Union
+from tqdm.notebook import tqdm
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+def optimize_SARIMAX(endog: Union[pd.Series, list], exog: Union[pd.Series, list], order_list: list, d: int, D: int, s: int) -> pd.DataFrame: 
+     results = [] 
+     for order in tqdm(order_list):
+          try: 
+               model = SARIMAX(
+                    endog,
+                    exog, 
+                    order=(order[0], d, order[1]),
+                    seasonal_order=(order[2], D, order[3], s),
+                    simple_differencing=False).fit(disp=False)
+          except:
+               continue 
+          aic = model.aic
+          results.append([order, aic])
+     result_df = pd.DataFrame(results)
+     result_df.columns = ['(p,q,P,Q)', 'AIC']
+ 
+     #Sort in ascending order, lower AIC is better
+     result_df = result_df.sort_values(by='AIC', ascending=True).reset_index(drop=True)
+     return result_df
+
+
+#Define the range of possible values for the orders p, q, P, and Q
+p = range(0, 4, 1)
+d = 1
+q = range(0, 4, 1)
+P = range(0, 4, 1)
+D = 0
+Q = range(0, 4, 1)
+s = 4
+
+parameters = product(p, q, P, Q)
+parameters_list = list(parameters)
+
+
+target_train = target[:200]
+exog_train = exog[:200]
+result_df = optimize_SARIMAX(target_train, exog_train, parameters_list, d, D, s)
+result_df
+
+
+best_model = SARIMAX(target_train, exog_train, order=(3,1,3), seasonal_order=(0,0,0,4), simple_differencing=False)
+best_model_fit = best_model.fit(disp=False)
+print(best_model_fit.summary())
+
+
+#QQ-plot
+best_model_fit.plot_diagnostics(figsize=(10,8));
+
+
+#Ljung-Box test
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+residuals = best_model_fit.resid
+pvalue = acorr_ljungbox(residuals, np.arange(1, 11, 1))
+print(pvalue)
+
+
+
+#Function to forecast the next timestep multiple times
+def rolling_forecast(endog: Union[pd.Series, list], exog: 
+Union[pd.Series, list], train_len: int, horizon: int, window: int, method: str) -> list:
+ 
+     total_len = train_len + horizon
+     if method == 'last':
+          pred_last_value = []
+ 
+          for i in range(train_len, total_len, window):
+               last_value = endog[:i].iloc[-1]
+               pred_last_value.extend(last_value for _ in range(window)) 
+          return pred_last_value
+ 
+     elif method == 'SARIMAX':
+          pred_SARIMAX = []
+ 
+          for i in range(train_len, total_len, window):
+               model = SARIMAX(endog[:i], exog[:i], order=(3,1,3),
+ seasonal_order=(0,0,0,4), simple_differencing=False)
+               res = model.fit(disp=False)
+               predictions = res.get_prediction(exog=exog)
+               oos_pred = predictions.predicted_mean.iloc[-window:]
+               pred_SARIMAX.extend(oos_pred) 
+          return pred_SARIMAX
+
+
+
+#Fit the model on the data from 1959 to the end of 2007
+target_train = target[:196]
+
+#The test set contains the values starting in 2008 to the third quarter of 2009
+# There is a total of seven values to predict
+target_test = target[196:]
+ 
+pred_df = pd.DataFrame({'actual': target_test})
+
+TRAIN_LEN = len(target_train)
+HORIZON = len(target_test)
+WINDOW = 1 
+
+pred_last_value = rolling_forecast(target, exog, TRAIN_LEN, HORIZON, WINDOW, 'last')
+pred_SARIMAX = rolling_forecast(target, exog, TRAIN_LEN, HORIZON, WINDOW, 'SARIMAX')
+
+pred_df['pred_last_value'] = pred_last_value
+pred_df['pred_SARIMAX'] = pred_SARIMAX
+pred_df
+
+
+#MAPE visualization
+def mape(y_true, y_pred):
+     return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+mape_last = mape(pred_df.actual, pred_df.pred_last_value)
+mape_SARIMAX = mape(pred_df.actual, pred_df.pred_SARIMAX)
+
+fig, ax = plt.subplots()
+x = ['naive last value', 'SARIMAX']
+y = [mape_last, mape_SARIMAX]
+ax.bar(x, y, width=0.4)
+ax.set_xlabel('Models')
+ax.set_ylabel('MAPE (%)')
+ax.set_ylim(0, 1)
+
+for index, value in enumerate(y):
+     plt.text(x=index, y=value + 0.05, s=str(round(value,2)), ha='center')
+
+plt.tight_layout()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,138 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+df = pd.read_csv('C:\\Time series datasets\\jj.csv')
+
+fig, ax = plt.subplots()
+
+ax.plot(df.date, df.data)
+ax.set_xlabel('Date')
+ax.set_ylabel('Earnings per share (USD)')
+
+plt.xticks(np.arange(0, 81, 8), [1960, 1962, 1964, 1966, 1968, 1970, 1972,
+ 1974, 1976, 1978, 1980])
+
+fig.autofmt_xdate()
+plt.tight_layout()
+
+
+from statsmodels.tsa.stattools import adfuller
+
+ad_fuller_result = adfuller(df['data'])
+
+print(f'ADF Statistic: {ad_fuller_result[0]}')
+print(f'p-value: {ad_fuller_result[1]}')
+
+
+#Apply first-order differencing
+eps_diff = np.diff(df['data'], n=1) 
+
+ad_fuller_result = adfuller(eps_diff) 
+
+print(f'ADF Statistic: {ad_fuller_result[0]}')
+print(f'p-value: {ad_fuller_result[1]}')
+
+
+
+#Take the differenced series and difference it again.
+eps_diff2 = np.diff(eps_diff, n=1) 
+
+ad_fuller_result = adfuller(eps_diff2) 
+
+print(f'ADF Statistic: {ad_fuller_result[0]}')
+print(f'p-value: {ad_fuller_result[1]}')
+
+
+
+#Function to fit all unique ARIMA(p,d,q) models
+from typing import Union
+from tqdm.notebook import tqdm
+
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+def optimize_ARIMA(endog: Union[pd.Series, list], order_list: list, d: int) -> pd.DataFrame: 
+ 
+     results = [] 
+ 
+     for order in tqdm(order_list): 
+          try: 
+               model = SARIMAX(endog, order=(order[0], d, order[1]),
+ simple_differencing=False).fit(disp=False) 
+          except:
+               continue
+ 
+          aic = model.aic 
+          results.append([order, aic]) 
+ 
+     result_df = pd.DataFrame(results) 
+     result_df.columns = ['(p,q)', 'AIC'] 
+ 
+     #Sort in ascending order, lower AIC is better
+     result_df = result_df.sort_values(by='AIC',
+ ascending=True).reset_index(drop=True) 
+ 
+     return result_df
+
+
+
+from itertools import product
+
+ps = range(0, 4, 1) 
+qs = range(0, 4, 1) 
+d = 2 
+order_list = list(product(ps, qs))
+
+
+train = df.data[:-4] 
+result_df = optimize_ARIMA(train, order_list, d) 
+result_df
+
+
+
+model = SARIMAX(train, order=(3,2,3), simple_differencing=False) 
+model_fit = model.fit(disp=False)
+model_fit.plot_diagnostics(figsize=(10,8));
+
+
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+residuals = model_fit.resid 
+pvalue = acorr_ljungbox(residuals, lags=np.arange(1, 11, 1)) 
+print(pvalue)
+
+
+test = df.iloc[-4:].copy()
+test['naive_seasonal'] = df['data'].iloc[76:80].values
+
+ARIMA_pred = model_fit.get_prediction(80, 83).predicted_mean 
+test['ARIMA_pred'] = ARIMA_pred
+
+
+
+#A function to compute the MAPE.
+def mape(y_true, y_pred): 
+     return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+mape_naive_seasonal = mape(test['data'], test['naive_seasonal']) 
+mape_ARIMA = mape(test['data'], test['ARIMA_pred']) 
+
+fig, ax = plt.subplots()
+
+x = ['naive seasonal', 'ARIMA(3,2,3)']
+y = [mape_naive_seasonal, mape_ARIMA]
+
+ax.bar(x, y, width=0.4)
+ax.set_xlabel('Models')
+ax.set_ylabel('MAPE (%)')
+ax.set_ylim(0, 15)
+
+for index, value in enumerate(y):
+     plt.text(x=index, y=value + 1, s=str(round(value,2)), ha='center')
+
+plt.tight_layout()
+
+
+
+
+
+

@@ -1,0 +1,35 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+df=pd.read_csv('C:\Time series datasets\jj.csv')
+df.head()
+df.tail()
+
+train = df[:-4]
+test = df[-4:]
+
+#predicting using last patterns of 4 quarters for next year four quarters patterns
+test.loc[:, 'pred_last_season'] = train['data'][-4:].values
+
+def mape(y_true, y_pred):
+      return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+mape_naive_seasonal = mape(test['data'], test['pred_last_season'])
+print(mape_naive_seasonal)
+
+fig, ax = plt.subplots()
+
+ax.plot(train['date'], train['data'], 'g-.', label='Train')
+ax.plot(test['date'], test['data'], 'b-', label='Test')
+ax.plot(test['date'], test['pred_last_season'], 'r--', label='Predicted')
+ax.set_xlabel('Date')
+ax.set_ylabel('Earnings per share (USD)')
+ax.axvspan(80, 83, color='#808080', alpha=0.2)
+ax.legend(loc=2)
+
+plt.xticks(np.arange(0, 85, 8), [1960, 1962, 1964, 1966, 1968, 1970, 1972, 
+1974, 1976, 1978, 1980])
+
+fig.autofmt_xdate()
+plt.tight_layout()

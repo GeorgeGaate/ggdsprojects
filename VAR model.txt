@@ -1,0 +1,214 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import statsmodels.api as sm
+import pandas as pd
+from itertools import product
+
+
+macro_econ_data = sm.datasets.macrodata.load_pandas().data
+
+fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(10,8))
+ax1.plot(macro_econ_data['realdpi'])
+
+ax1.set_xlabel('Date')
+ax1.set_ylabel('Real disposable income (k$)')
+ax1.set_title('realdpi')
+ax1.spines['top'].set_alpha(0)
+
+ax2.plot(macro_econ_data['realcons'])
+ax2.set_xlabel('Date')
+ax2.set_ylabel('Real consumption (k$)')
+ax2.set_title('realcons')
+ax2.spines['top'].set_alpha(0)
+
+plt.xticks(np.arange(0, 208, 16), np.arange(1959, 2010, 4))
+fig.autofmt_xdate()
+plt.tight_layout()
+
+
+#stationarity test
+from statsmodels.tsa.stattools import adfuller
+
+#ADF test for realdpi
+ad_fuller_result_1 = adfuller(macro_econ_data['realdpi'])
+print('realdpi') 
+print(f'ADF Statistic: {ad_fuller_result_1[0]}')
+print(f'p-value: {ad_fuller_result_1[1]}')
+print('\n---------------------\n')
+
+
+#ADF test for realcons
+ad_fuller_result_2 = adfuller(macro_econ_data['realcons'])
+print('realcons') 
+print(f'ADF Statistic: {ad_fuller_result_2[0]}')
+print(f'p-value: {ad_fuller_result_2[1]}')
+
+
+#apply transformation to make both series stationary
+#realdpi
+ad_fuller_result_1 = adfuller(macro_econ_data['realdpi'].diff()[1:]) 
+print('realdpi')
+print(f'ADF Statistic: {ad_fuller_result_1[0]}')
+print(f'p-value: {ad_fuller_result_1[1]}')
+print('\n---------------------\n')
+
+
+#realcons
+ad_fuller_result_2 = adfuller(macro_econ_data['realcons'].diff()[1:]) 
+print('realcons')
+print(f'ADF Statistic: {ad_fuller_result_2[0]}')
+print(f'p-value: {ad_fuller_result_2[1]}')
+
+
+#Function to fit many VAR(p) models and select the one with the lowest AIC
+
+from typing import Union
+from tqdm.notebook import tqdm
+from statsmodels.tsa.statespace.varmax import VARMAX
+def optimize_VAR(endog: Union[pd.Series, list]) -> pd.DataFrame:
+ 
+     results = []
+     for i in tqdm(range(15)): 
+          try:
+               model = VARMAX(endog, order=(i, 0)).fit(dips=False)
+          except:
+               continue
+          aic = model.aic
+          results.append([i, aic])
+ 
+     result_df = pd.DataFrame(results)
+     result_df.columns = ['p', 'AIC']
+     result_df = result_df.sort_values(by='AIC', ascending=True).reset_index(drop=True)
+ 
+     return result_df
+
+
+#Select only realdpi and realcons, as the only two variables of interest
+endog = macro_econ_data[['realdpi', 'realcons']]
+
+#Difference both series, first-order differencing makes them stationary 
+endog_diff = macro_econ_data[['realdpi', 'realcons']].diff()[1:] 
+
+#train set
+train = endog_diff[:162]
+
+#test set 
+test = endog_diff[162:]
+ 
+result_df = optimize_VAR(train) 
+result_df
+
+
+#Granger causality test
+from statsmodels.tsa.stattools import grangercausalitytests
+
+print('realcons Granger-causes realdpi?\n')
+print('------------------')
+granger_1 = grangercausalitytests(macro_econ_data[['realdpi', 'realcons']].diff()[1:], [3])
+
+print('\nrealdpi Granger-causes realcons?\n')
+print('------------------')
+granger_2 = grangercausalitytests(macro_econ_data[['realcons', 'realdpi']].diff()[1:], [3])
+
+
+best_model = VARMAX(train, order=(3,0))
+best_model_fit = best_model.fit(disp=False)
+
+
+#residuals analysis for realdpi
+best_model_fit.plot_diagnostics(figsize=(10,8), variable=0);
+
+#residuals analysis for realcons
+best_model_fit.plot_diagnostics(figsize=(10,8), variable=1);
+
+
+#quantitative analysis using the Ljung-Box test
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+#realdpi
+realgdp_residuals = best_model_fit.resid['realdpi']
+pvalue = acorr_ljungbox(realgdp_residuals, np.arange(1, 11, 1))
+print(pvalue)
+
+
+#realcons
+realcons_residuals = best_model_fit.resid['realcons']
+pvalue = acorr_ljungbox(realcons_residuals, np.arange(1, 11, 1))
+print(pvalue)
+
+
+#Function for rolling forecasts over a test set
+def rolling_forecast(df: pd.DataFrame, train_len: int, horizon: int, window: int, method: str) -> list: 
+     total_len = train_len + horizon
+     end_idx = train_len 
+     if method == 'VAR':
+          realdpi_pred_VAR = [] 
+          realcons_pred_VAR = [] 
+          for i in range(train_len, total_len, window):
+               model = VARMAX(df[:i], order=(3,0))
+               res = model.fit(disp=False)
+               predictions = res.get_prediction(0, i + window - 1) 
+               oos_pred_realdpi = predictions.predicted_mean.iloc[- window:]['realdpi'] 
+               oos_pred_realcons = predictions.predicted_mean.iloc[- window:]['realcons']  
+               realdpi_pred_VAR.extend(oos_pred_realdpi) 
+               realcons_pred_VAR.extend(oos_pred_realcons) 
+          return realdpi_pred_VAR, realcons_pred_VAR
+     elif method == 'last': 
+          realdpi_pred_last = []
+          realcons_pred_last = [] 
+          for i in range(train_len, total_len, window): 
+               realdpi_last = df[:i].iloc[-1]['realdpi']
+               realcons_last = df[:i].iloc[-1]['realcons'] 
+               realdpi_pred_last.extend(realdpi_last for _ in range(window))
+               realcons_pred_last.extend(realcons_last for _ in range(window)) 
+          return realdpi_pred_last, realcons_pred_last
+
+
+TRAIN_LEN = len(train)
+HORIZON = len(test)
+WINDOW = 4 
+realdpi_pred_VAR, realcons_pred_VAR = rolling_forecast(endog_diff, TRAIN_LEN, HORIZON, WINDOW, 'VAR')
+
+#integrating the differenced values
+test = endog[163:]
+test['realdpi_pred_VAR'] = pd.Series()
+test['realdpi_pred_VAR'] = endog.iloc[162]['realdpi'] +  np.cumsum(realdpi_pred_VAR) 
+test['realcons_pred_VAR'] = pd.Series()
+test['realcons_pred_VAR'] = endog.iloc[162]['realcons'] +  np.cumsum(realcons_pred_VAR)
+test
+
+
+#baseline method
+realdpi_pred_last, realcons_pred_last = rolling_forecast(endog, TRAIN_LEN, HORIZON, WINDOW, 'last') 
+test['realdpi_pred_last'] = realdpi_pred_last
+test['realcons_pred_last'] = realcons_pred_last
+test
+
+
+#calculate the MAPE
+def mape(y_true, y_pred):
+     return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+mape_realdpi_VAR = mape(test['realdpi'], test['realdpi_pred_VAR'])
+mape_realdpi_last = mape(test['realdpi'], test['realdpi_pred_last'])
+mape_realcons_VAR = mape(test['realcons'], test['realcons_pred_VAR'])
+mape_realcons_last = mape(test['realcons'], test['realcons_pred_last'])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
